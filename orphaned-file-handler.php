@@ -27,6 +27,7 @@ class WP_Offload_Orphans_Unified {
 
         add_action( 'wp_ajax_scan_orphaned_files', [ $this, 'ajax_scan_orphaned_files' ] );
         add_action( 'wp_ajax_process_orphaned_file', [ $this, 'ajax_process_orphaned_file' ] );
+        add_action( 'wp_ajax_clear_orphan_history', [ $this, 'ajax_clear_orphan_history' ] );
     }
 
     public function add_network_admin_menu() {
@@ -51,7 +52,6 @@ class WP_Offload_Orphans_Unified {
     }
 
     public function render_admin_page() {
-        // Dependency Check: Ensure WP Offload Media is active before rendering the tool
         global $as3cf;
         if ( empty( $as3cf ) ) {
             ?>
@@ -69,7 +69,7 @@ class WP_Offload_Orphans_Unified {
         ?>
         <div class="wrap">
             <h1>Direct Upload Orphaned Files</h1>
-            <p>Scan your upload directory for files not registered in the Media Library. Selected files will be pushed <strong>directly</strong> to your DigitalOcean Space with public permissions, without being added to the WordPress database.</p>
+            <p>Scan your upload directory for files not registered in the Media Library. Files successfully pushed to DigitalOcean Spaces are hidden from future scans.</p>
             
             <?php if ( $is_multisite ) : 
                 $sites = get_sites( [ 'number' => 1000 ] );
@@ -92,11 +92,15 @@ class WP_Offload_Orphans_Unified {
                 
                 <label style="background: #f0f0f1; padding: 5px 10px; border-radius: 4px; border: 1px solid #8c8f94;">
                     <input type="checkbox" id="include-thumbnails" value="1"> 
-                    Include resized thumbnails (e.g., -1024x771.jpg)
+                    Include resized thumbnails
                 </label>
 
                 <button id="scan-orphans-btn" class="button button-primary" <?php echo $is_multisite ? 'disabled' : ''; ?>>
                     Scan For Orphaned Files (Limit 50)
+                </button>
+
+                <button id="clear-history-btn" class="button button-secondary" <?php echo $is_multisite ? 'disabled' : ''; ?> title="Reset the memory of previously uploaded files so they appear in scans again.">
+                    Reset Upload History
                 </button>
             </div>
             
@@ -108,10 +112,24 @@ class WP_Offload_Orphans_Unified {
 
                 if (isMultisite) {
                     $('#site-selector').on('change', function() {
-                        $('#scan-orphans-btn').prop('disabled', $(this).val() === "");
+                        let isDisabled = $(this).val() === "";
+                        $('#scan-orphans-btn, #clear-history-btn').prop('disabled', isDisabled);
                     });
                 }
 
+                // --- Handle Clear History ---
+                $('#clear-history-btn').on('click', function() {
+                    let blogId = isMultisite ? $('#site-selector').val() : 1;
+                    if(isMultisite && !blogId) return;
+
+                    if(confirm("Are you sure? This will make previously uploaded files show up in your scans again if they are still on your server.")) {
+                        $.post(ajaxurl, { action: 'wp_ajax_clear_orphan_history', blog_id: blogId }, function(response) {
+                            alert("Upload history cleared for this site.");
+                        });
+                    }
+                });
+
+                // --- Handle Scanning ---
                 $('#scan-orphans-btn').on('click', function() {
                     let blogId = isMultisite ? $('#site-selector').val() : 1;
                     if(isMultisite && !blogId) return;
@@ -119,16 +137,16 @@ class WP_Offload_Orphans_Unified {
                     let searchTerm = $('#search-orphan').val().trim();
                     let includeThumbs = $('#include-thumbnails').is(':checked') ? 1 : 0;
 
-                    $('#scan-results').html('<p>Scanning directory for unregistered files...</p>');
+                    $('#scan-results').html('<p>Scanning directory... (Skipping previously uploaded files)</p>');
                     
                     $.post(ajaxurl, { action: 'scan_orphaned_files', blog_id: blogId, search: searchTerm, include_thumbs: includeThumbs }, function(response) {
                         if(response.success) {
                             if(response.data.length === 0) {
-                                $('#scan-results').html('<p>No orphaned files found matching your criteria!</p>');
+                                $('#scan-results').html('<p>No new orphaned files found matching your criteria!</p>');
                                 return;
                             }
                             
-                            let html = '<h3>Found ' + response.data.length + ' Orphaned Files</h3>';
+                            let html = '<h3>Found ' + response.data.length + ' New Orphaned Files</h3>';
                             html += '<div style="margin-bottom: 15px;"><label><strong><input type="checkbox" id="select-all-orphans"> Select All</strong></label></div>';
                             html += '<ul style="list-style-type: none; padding-left: 0; background: #fff; padding: 15px; border: 1px solid #ccd0d4; max-height: 400px; overflow-y: auto;">';
                             
@@ -188,7 +206,7 @@ class WP_Offload_Orphans_Unified {
                     $.post(ajaxurl, { action: 'process_orphaned_file', file: file, blog_id: blogId }, function(response) {
                         listItem.find('.status-text').remove();
                         if(response.success) {
-                            listItem.append(' <span class="status-text" style="color: #46b450; font-weight: bold;">Pushed to DO Spaces (Public)!</span>');
+                            listItem.append(' <span class="status-text" style="color: #46b450; font-weight: bold;">Pushed & Remembered!</span>');
                             listItem.find('input').prop('checked', false);
                             successCount++;
                         } else {
@@ -207,6 +225,20 @@ class WP_Offload_Orphans_Unified {
             </script>
         </div>
         <?php
+    }
+
+    /**
+     * Clear the tracking history
+     */
+    public function ajax_clear_orphan_history() {
+        if ( is_multisite() && ! empty( $_POST['blog_id'] ) ) {
+            switch_to_blog( intval( $_POST['blog_id'] ) );
+        }
+        
+        delete_option( 'wp_offload_orphans_history' );
+        
+        if ( is_multisite() ) restore_current_blog();
+        wp_send_json_success();
     }
 
     public function ajax_scan_orphaned_files() {
@@ -229,6 +261,10 @@ class WP_Offload_Orphans_Unified {
             wp_send_json_error( 'Upload directory does not exist for this site.' );
         }
 
+        // Fetch our list of previously uploaded files
+        $upload_history = get_option( 'wp_offload_orphans_history', [] );
+        if ( ! is_array( $upload_history ) ) $upload_history = [];
+
         $orphaned_files = [];
         $iterator = new RecursiveIteratorIterator( new RecursiveDirectoryIterator( $basedir, RecursiveDirectoryIterator::SKIP_DOTS ) );
         $limit = 50; 
@@ -242,6 +278,12 @@ class WP_Offload_Orphans_Unified {
             $filepath = $file->getPathname();
             $filename = basename( $filepath );
             
+            // 1. Check if we have ALREADY uploaded this file. If so, skip it completely.
+            $file_hash = md5( $filepath );
+            if ( isset( $upload_history[ $file_hash ] ) ) {
+                continue;
+            }
+
             if ( preg_match( '/(\.htaccess|\.php|\.DS_Store|\.html)$/i', $filepath ) ) continue;
             
             if ( ! $include_thumbs && preg_match( '/-\d+x\d+\.[a-z]{3,4}$/i', $filepath ) ) {
@@ -274,66 +316,96 @@ class WP_Offload_Orphans_Unified {
     }
 
     public function ajax_process_orphaned_file() {
-        if ( empty( $_POST['file'] ) ) {
-            wp_send_json_error( 'Missing file data.' );
-        }
-
-        $is_multisite = is_multisite();
-
-        if ( $is_multisite ) {
-            if ( empty( $_POST['blog_id'] ) ) wp_send_json_error( 'Missing site data.' );
-            $blog_id = intval( $_POST['blog_id'] );
-            switch_to_blog( $blog_id );
-        }
-
-        $filepath = base64_decode( sanitize_text_field( $_POST['file'] ) );
-
-        if ( ! file_exists( $filepath ) ) {
-            if ( $is_multisite ) restore_current_blog();
-            wp_send_json_error( 'File does not exist on server.' );
-        }
-
-        global $as3cf;
-        if ( empty( $as3cf ) ) {
-            if ( $is_multisite ) restore_current_blog();
-            wp_send_json_error( 'WP Offload Media is not active.' );
-        }
-
-        $bucket = $as3cf->get_setting( 'bucket' );
-        if ( empty( $bucket ) ) {
-            if ( $is_multisite ) restore_current_blog();
-            wp_send_json_error( 'No bucket configured in WP Offload Media settings.' );
-        }
-
-        $upload_dir = wp_upload_dir();
-        $basedir = wp_normalize_path( $upload_dir['basedir'] );
-        $normalized_filepath = wp_normalize_path( $filepath );
-        
-        $relative_path = ltrim( str_replace( $basedir, '', $normalized_filepath ), '/' );
-        
-        $prefix = $as3cf->get_setting( 'object-prefix' );
-        $key = $prefix . $relative_path;
-
-        $filetype = wp_check_filetype( basename( $filepath ), null );
-        $mime_type = ! empty( $filetype['type'] ) ? $filetype['type'] : 'application/octet-stream';
-
-        // Direct push with explicit Public ACL
         try {
-            $provider_client = $as3cf->get_provider_client();
-            $provider_client->putObject( [
+            @set_time_limit( 0 ); 
+            @ini_set( 'memory_limit', '1024M' );
+
+            if ( empty( $_POST['file'] ) ) {
+                wp_send_json_error( 'Missing file data.' );
+            }
+
+            $is_multisite = is_multisite();
+
+            if ( $is_multisite ) {
+                if ( empty( $_POST['blog_id'] ) ) wp_send_json_error( 'Missing site data.' );
+                $blog_id = intval( $_POST['blog_id'] );
+                switch_to_blog( $blog_id );
+            }
+
+            $filepath = base64_decode( sanitize_text_field( $_POST['file'] ) );
+
+            if ( ! file_exists( $filepath ) ) {
+                if ( $is_multisite ) restore_current_blog();
+                wp_send_json_error( 'File does not exist on server.' );
+            }
+
+            global $as3cf;
+            $bucket = $as3cf->get_setting( 'bucket' );
+            $region = $as3cf->get_setting( 'region' );
+            if ( empty( $region ) ) $region = ''; 
+
+            $upload_dir = wp_upload_dir();
+            $basedir = wp_normalize_path( $upload_dir['basedir'] );
+            $normalized_filepath = wp_normalize_path( $filepath );
+            
+            $relative_path = ltrim( str_replace( $basedir, '', $normalized_filepath ), '/' );
+            $prefix = $as3cf->get_setting( 'object-prefix' );
+            $key = ltrim( $prefix . $relative_path, '/' );
+
+            $filetype = wp_check_filetype( basename( $filepath ), null );
+            $mime_type = ! empty( $filetype['type'] ) ? $filetype['type'] : 'application/octet-stream';
+
+            $provider_wrapper = $as3cf->get_provider_client();
+
+            if ( method_exists( $provider_wrapper, 'get_client' ) ) {
+                try { $provider_wrapper->get_client( [ 'region' => $region ] ); } 
+                catch ( \Throwable $e ) { try { $provider_wrapper->get_client(); } catch ( \Throwable $e2 ) {} }
+            }
+
+            $raw_client = null;
+            $reflection = new \ReflectionClass( $provider_wrapper );
+            
+            while ( $reflection ) {
+                if ( $reflection->hasProperty( 'client' ) ) {
+                    $prop = $reflection->getProperty( 'client' );
+                    $prop->setAccessible( true ); 
+                    $potential_client = $prop->getValue( $provider_wrapper );
+                    if ( is_object( $potential_client ) ) {
+                        $raw_client = $potential_client;
+                        break;
+                    }
+                }
+                $reflection = $reflection->getParentClass();
+            }
+
+            if ( empty( $raw_client ) || ! is_object( $raw_client ) ) {
+                throw new \Exception( 'Could not extract the true SDK client.' );
+            }
+
+            // PUSH TO CLOUD
+            $raw_client->putObject( [
                 'Bucket'      => $bucket,
                 'Key'         => $key,
                 'SourceFile'  => $filepath,
                 'ContentType' => $mime_type,
-                'ACL'         => 'public-read', // Explicitly setting to public read
+                'ACL'         => 'public-read', 
             ] );
 
-            if ( $is_multisite ) restore_current_blog();
-            wp_send_json_success( 'Pushed directly to DigitalOcean Spaces.' );
+            // --- NEW: RECORD THE SUCCESSFUL UPLOAD ---
+            // We store an MD5 hash of the path to keep the database size very small
+            $upload_history = get_option( 'wp_offload_orphans_history', [] );
+            if ( ! is_array( $upload_history ) ) $upload_history = [];
+            
+            $upload_history[ md5( $filepath ) ] = time(); // Record hash and timestamp
+            update_option( 'wp_offload_orphans_history', $upload_history, false ); // 'false' prevents autoload bloat
+            // -----------------------------------------
 
-        } catch ( Exception $e ) {
             if ( $is_multisite ) restore_current_blog();
-            wp_send_json_error( 'Upload failed: ' . $e->getMessage() );
+            wp_send_json_success( 'Pushed directly to DO Spaces.' );
+
+        } catch ( \Throwable $e ) {
+            if ( is_multisite() ) restore_current_blog();
+            wp_send_json_error( 'Upload Failed: ' . $e->getMessage() );
         }
     }
 }
