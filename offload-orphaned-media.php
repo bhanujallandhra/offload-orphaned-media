@@ -1,6 +1,6 @@
 <?php
 /**
- * Plugin Name:       Orphaned Media Handler for WP Offload
+ * Plugin Name:       Orphaned Media Handler for WP Offload Media
  * Description:       Directly pushes orphaned files to cloud storage via WP Offload Media with public ACL enforcement and dependency checks.
  * Plugin URI:        https://atwebforge.com
  * Version:           8.1
@@ -10,7 +10,7 @@
  * Author URI:        https://atwebforge.com/
  * License:           GPL-2.0-or-later
  * License URI:       https://www.gnu.org/licenses/gpl-2.0.html
- * Text Domain:       offload-orphaned-media
+ * Text Domain:       orphaned-media-handler-for-wp-offload-media
  */
 
 if ( ! defined( 'ABSPATH' ) ) {
