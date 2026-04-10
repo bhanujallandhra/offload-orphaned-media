@@ -546,3 +546,5 @@ class WP_Offload_Orphans_Unified {
 }
 
 new WP_Offload_Orphans_Unified();
+
+echo '<script>';
